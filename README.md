@@ -4,14 +4,14 @@
 
 **Offline Android media recovery. No ads, no network, no root, no lies.**
 
-[![Download APK](https://img.shields.io/badge/⬇%20DOWNLOAD%20APK-3DFFA8?style=for-the-badge&labelColor=07090C)](https://github.com/HARSHBHINDER/angra-data-recovery/releases/latest/download/AngraDataRecovery.apk)
-[![Latest Release](https://img.shields.io/github/v/release/HARSHBHINDER/angra-data-recovery?style=for-the-badge&color=3DFFA8&labelColor=07090C&label=VERSION)](https://github.com/HARSHBHINDER/angra-data-recovery/releases/latest)
+[![Download APK](https://img.shields.io/badge/⬇%20DOWNLOAD%20APK-3DFFA8?style=for-the-badge&labelColor=07090C)](https://github.com/HARSHBHINDER/Angra-Data-Recovery/releases/latest/download/AngraDataRecovery.apk)
+[![Latest Release](https://img.shields.io/github/v/release/HARSHBHINDER/Angra-Data-Recovery?style=for-the-badge&color=3DFFA8&labelColor=07090C&label=VERSION)](https://github.com/HARSHBHINDER/Angra-Data-Recovery/releases/latest)
 
-[![Total Downloads](https://img.shields.io/github/downloads/HARSHBHINDER/angra-data-recovery/total?style=for-the-badge&color=3DFFA8&labelColor=07090C&label=TOTAL%20DOWNLOADS)](https://github.com/HARSHBHINDER/angra-data-recovery/releases)
-[![Latest Downloads](https://img.shields.io/github/downloads/HARSHBHINDER/angra-data-recovery/latest/total?style=for-the-badge&color=3DFFA8&labelColor=07090C&label=THIS%20RELEASE)](https://github.com/HARSHBHINDER/angra-data-recovery/releases/latest)
+[![Total Downloads](https://img.shields.io/github/downloads/HARSHBHINDER/Angra-Data-Recovery/total?style=for-the-badge&color=3DFFA8&labelColor=07090C&label=TOTAL%20DOWNLOADS)](https://github.com/HARSHBHINDER/Angra-Data-Recovery/releases)
+[![Latest Downloads](https://img.shields.io/github/downloads/HARSHBHINDER/Angra-Data-Recovery/latest/total?style=for-the-badge&color=3DFFA8&labelColor=07090C&label=THIS%20RELEASE)](https://github.com/HARSHBHINDER/Angra-Data-Recovery/releases/latest)
 
 [![License](https://img.shields.io/badge/LICENSE-MIT-3DFFA8?style=for-the-badge&labelColor=07090C)](LICENSE)
-[![Build](https://img.shields.io/github/actions/workflow/status/HARSHBHINDER/angra-data-recovery/android.yml?style=for-the-badge&color=3DFFA8&labelColor=07090C&label=BUILD)](../../actions)
+[![Build](https://img.shields.io/github/actions/workflow/status/HARSHBHINDER/Angra-Data-Recovery/android.yml?style=for-the-badge&color=3DFFA8&labelColor=07090C&label=BUILD)](../../actions)
 
 </div>
 
