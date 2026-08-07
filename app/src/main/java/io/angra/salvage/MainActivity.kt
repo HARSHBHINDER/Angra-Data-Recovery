@@ -2,10 +2,12 @@ package io.angra.salvage
 
 import android.app.Activity
 import android.content.ContentResolver
+import android.content.Intent
 import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.text.format.Formatter
 import androidx.activity.ComponentActivity
@@ -46,7 +48,20 @@ private val Amber = Color(0xFFFFC24B)
 private val Dim = Color(0xFF7E93A6)
 private val Mono = FontFamily.Monospace
 
-data class Recoverable(val uri: Uri, val name: String, val sizeBytes: Long, val path: String)
+enum class Kind { TRASHED, STRANDED, FOLDER }
+
+data class Recoverable(
+    val uri: Uri,
+    val name: String,
+    val sizeBytes: Long,
+    val path: String,
+    val kind: Kind
+)
+
+/** Directory or filename markers that mean "on disk but hidden from the user". */
+private val HIDDEN_MARKERS = listOf(
+    ".statuses", ".thumbnails", ".trashed", ".nomedia", "cache", "recycle", ".pending"
+)
 
 class MainActivity : ComponentActivity() {
 
@@ -55,32 +70,38 @@ class MainActivity : ComponentActivity() {
         setContent { App() }
     }
 
-    /** One cursor walk for both scans — they differ only in the query args. */
-    private suspend fun query(args: Bundle): List<Recoverable> = withContext(Dispatchers.IO) {
-        val cols = arrayOf(
-            MediaStore.Files.FileColumns._ID,
-            MediaStore.Files.FileColumns.DISPLAY_NAME,
-            MediaStore.Files.FileColumns.SIZE,
-            MediaStore.Files.FileColumns.RELATIVE_PATH
-        )
-        val out = mutableListOf<Recoverable>()
-        runCatching {
-            contentResolver.query(
-                MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL), cols, args, null
-            )?.use { c ->
-                while (c.moveToNext()) {
-                    if (c.getLong(2) <= 0L) continue
-                    out += Recoverable(
-                        MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL, c.getLong(0)),
-                        c.getString(1) ?: "(unnamed)",
-                        c.getLong(2),
-                        c.getString(3) ?: "—"
-                    )
+    // ---------- MediaStore layers ----------
+
+    /** One cursor walk for both MediaStore scans — they differ only in the query args. */
+    private suspend fun query(args: Bundle, kind: Kind): List<Recoverable> =
+        withContext(Dispatchers.IO) {
+            val cols = arrayOf(
+                MediaStore.Files.FileColumns._ID,
+                MediaStore.Files.FileColumns.DISPLAY_NAME,
+                MediaStore.Files.FileColumns.SIZE,
+                MediaStore.Files.FileColumns.RELATIVE_PATH
+            )
+            val out = mutableListOf<Recoverable>()
+            runCatching {
+                contentResolver.query(
+                    MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL), cols, args, null
+                )?.use { c ->
+                    while (c.moveToNext()) {
+                        if (c.getLong(2) <= 0L) continue
+                        out += Recoverable(
+                            MediaStore.Files.getContentUri(
+                                MediaStore.VOLUME_EXTERNAL, c.getLong(0)
+                            ),
+                            c.getString(1) ?: "(unnamed)",
+                            c.getLong(2),
+                            c.getString(3) ?: "—",
+                            kind
+                        )
+                    }
                 }
             }
+            out
         }
-        out
-    }
 
     /**
      * Android holds deleted media in a trash state for 30-60 days. MATCH_ONLY on
@@ -91,7 +112,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
         return query(Bundle().apply {
             putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
-        })
+        }, Kind.TRASHED)
     }
 
     /**
@@ -114,14 +135,109 @@ class MainActivity : ComponentActivity() {
                 ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
                 "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
             )
-        })
+        }, Kind.STRANDED)
     }
+
+    // ---------- SAF folder layer: every file type, any volume ----------
+
+    /**
+     * Recursive walk of a user-picked folder tree — SD card, USB-OTG stick, or any
+     * directory. MediaStore only indexes media, so this is what reaches .txt, .md, .pdf,
+     * .docx, .zip and everything else. DocumentsContract is used directly rather than
+     * DocumentFile because DocumentFile issues one query per node and crawls on big trees.
+     */
+    private suspend fun scanTree(tree: Uri, onProgress: (Int) -> Unit): List<Recoverable> =
+        withContext(Dispatchers.IO) {
+            val out = mutableListOf<Recoverable>()
+            val cols = arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE
+            )
+            // ponytail: 50k-file ceiling so a pathological tree can't OOM the list.
+            // Raise it when someone actually hits it with a real card.
+            val cap = 50_000
+            val queue = ArrayDeque(listOf(DocumentsContract.getTreeDocumentId(tree) to ""))
+
+            while (queue.isNotEmpty() && out.size < cap) {
+                val (docId, prefix) = queue.removeFirst()
+                val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId)
+                runCatching {
+                    contentResolver.query(children, cols, null, null, null)?.use { c ->
+                        while (c.moveToNext() && out.size < cap) {
+                            val id = c.getString(0) ?: continue
+                            val name = c.getString(1) ?: "(unnamed)"
+                            val mime = c.getString(2) ?: ""
+                            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                                queue += id to "$prefix$name/"
+                                continue
+                            }
+                            val size = c.getLong(3)
+                            if (size <= 0L) continue
+                            out += Recoverable(
+                                DocumentsContract.buildDocumentUriUsingTree(tree, id),
+                                name, size, prefix.ifEmpty { "/" }, Kind.FOLDER
+                            )
+                        }
+                    }
+                }
+                onProgress(out.size)
+            }
+            // Hidden/orphaned files first — those are what someone scanning a card wants.
+            out.sortedByDescending { r ->
+                val hay = (r.path + r.name).lowercase()
+                HIDDEN_MARKERS.count { hay.contains(it) }
+            }
+        }
+
+    /**
+     * Copy selected files into a user-picked destination tree.
+     * Refuses to write back onto the volume being recovered from — doing so can overwrite
+     * the free space still holding other deleted files.
+     */
+    private suspend fun export(
+        items: List<Recoverable>,
+        dest: Uri,
+        sourceTree: Uri?
+    ): String = withContext(Dispatchers.IO) {
+        if (sourceTree != null && sameVolume(dest, sourceTree)) {
+            return@withContext "REFUSED — pick a destination on a different volume"
+        }
+        val destDir = DocumentsContract.buildDocumentUriUsingTree(
+            dest, DocumentsContract.getTreeDocumentId(dest)
+        )
+        var ok = 0
+        var failed = 0
+        for (r in items) {
+            val wrote = runCatching {
+                val target = DocumentsContract.createDocument(
+                    contentResolver, destDir, "application/octet-stream", r.name
+                ) ?: return@runCatching false
+                contentResolver.openInputStream(r.uri)?.use { input ->
+                    contentResolver.openOutputStream(target)?.use { output ->
+                        input.copyTo(output)
+                    } ?: return@runCatching false
+                } ?: return@runCatching false
+                true
+            }.getOrDefault(false)
+            if (wrote) ok++ else failed++
+        }
+        "EXPORTED $ok" + if (failed > 0) " · $failed failed" else ""
+    }
+
+    /** Tree URIs encode their volume in the document id ("primary:DCIM", "1A2B-3C4D:x"). */
+    private fun sameVolume(a: Uri, b: Uri): Boolean =
+        DocumentsContract.getTreeDocumentId(a).substringBefore(':') ==
+            DocumentsContract.getTreeDocumentId(b).substringBefore(':')
 
     /** Untrash. Android returns an IntentSender so the *user* grants the write, not us. */
     private fun restoreRequest(uris: List<Uri>): IntentSender? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && uris.isNotEmpty())
             MediaStore.createTrashRequest(contentResolver, uris, false).intentSender
         else null
+
+    // ---------------- UI ----------------
 
     @Composable
     private fun App() {
@@ -132,11 +248,11 @@ class MainActivity : ComponentActivity() {
             )
         ) {
             val scope = rememberCoroutineScope()
-            var trashed by remember { mutableStateOf<List<Recoverable>>(emptyList()) }
-            var stranded by remember { mutableStateOf<List<Recoverable>>(emptyList()) }
+            var found by remember { mutableStateOf<List<Recoverable>>(emptyList()) }
             var scanning by remember { mutableStateOf(false) }
             var scanned by remember { mutableStateOf(false) }
             var status by remember { mutableStateOf("") }
+            var sourceTree by remember { mutableStateOf<Uri?>(null) }
             val selected = remember { mutableStateListOf<Uri>() }
 
             val perms = rememberLauncherForActivityResult(
@@ -148,9 +264,40 @@ class MainActivity : ComponentActivity() {
             ) { res ->
                 if (res.resultCode == Activity.RESULT_OK) {
                     status = "RESTORED ${selected.size} item(s) to gallery"
-                    trashed = trashed.filterNot { it.uri in selected }
+                    found = found.filterNot { it.uri in selected }
                     selected.clear()
                 } else status = "restore cancelled"
+            }
+
+            val folderPicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocumentTree()
+            ) { tree ->
+                if (tree == null) return@rememberLauncherForActivityResult
+                runCatching {
+                    contentResolver.takePersistableUriPermission(
+                        tree, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
+                sourceTree = tree
+                selected.clear()
+                scanning = true; status = ""
+                scope.launch {
+                    found = scanTree(tree) { n -> status = "$n files…" }
+                    scanning = false; scanned = true
+                    status = "${found.size} files in folder"
+                }
+            }
+
+            val destPicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocumentTree()
+            ) { dest ->
+                if (dest == null) return@rememberLauncherForActivityResult
+                val items = found.filter { it.uri in selected }
+                scope.launch {
+                    status = "exporting ${items.size}…"
+                    status = export(items, dest, sourceTree)
+                    selected.clear()
+                }
             }
 
             LaunchedEffect(Unit) {
@@ -183,19 +330,27 @@ class MainActivity : ComponentActivity() {
                 val pulse by rememberInfiniteTransition(label = "p").animateFloat(
                     0.45f, 1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "pa"
                 )
+
                 Bar(
-                    label = if (scanning) "SCANNING…" else "▸  BEGIN SCAN",
+                    label = if (scanning) "SCANNING…" else "▸  SCAN THIS PHONE",
                     filled = false,
                     alpha = if (scanning) pulse else 1f,
                     enabled = !scanning
                 ) {
+                    sourceTree = null
+                    selected.clear()
                     scanning = true; status = ""
                     scope.launch {
-                        trashed = scanTrashed()
-                        stranded = scanStranded()
+                        found = scanTrashed() + scanStranded()
                         scanning = false; scanned = true
-                        status = "${trashed.size} recoverable · ${stranded.size} stranded"
+                        val t = found.count { it.kind == Kind.TRASHED }
+                        status = "$t recoverable · ${found.size - t} stranded"
                     }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                Bar("▸  SCAN SD CARD / USB / FOLDER", filled = false, enabled = !scanning) {
+                    folderPicker.launch(null)
                 }
 
                 if (status.isNotEmpty()) {
@@ -207,36 +362,45 @@ class MainActivity : ComponentActivity() {
                 }
 
                 if (selected.isNotEmpty()) {
+                    val restorable = found.any { it.uri in selected && it.kind == Kind.TRASHED }
                     Spacer(Modifier.height(14.dp))
-                    Bar("RESTORE ${selected.size} SELECTED", filled = true) {
-                        restoreRequest(selected.toList())?.let {
-                            restoreLauncher.launch(IntentSenderRequest.Builder(it).build())
-                        } ?: run { status = "needs Android 11+" }
+                    if (restorable) {
+                        Bar("RESTORE ${selected.size} TO GALLERY", filled = true) {
+                            restoreRequest(selected.toList())?.let {
+                                restoreLauncher.launch(IntentSenderRequest.Builder(it).build())
+                            } ?: run { status = "needs Android 11+" }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    Bar("EXPORT ${selected.size} TO FOLDER…", filled = true) {
+                        destPicker.launch(null)
                     }
                 }
 
                 Spacer(Modifier.height(16.dp))
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (trashed.isNotEmpty()) {
-                        item { SectionLabel("RECOVERABLE", "restorable to gallery", Jade) }
-                        items(trashed) { r ->
-                            FileRow(r, r.uri in selected, Jade) {
+                    val groups = found.groupBy { it.kind }
+                    listOf(
+                        Triple(Kind.TRASHED, "RECOVERABLE", "restorable to gallery"),
+                        Triple(Kind.FOLDER, "IN FOLDER", "every file type, hidden ones first"),
+                        Triple(Kind.STRANDED, "STRANDED", "on disk, hidden from gallery")
+                    ).forEach { (kind, title, sub) ->
+                        val list = groups[kind].orEmpty()
+                        if (list.isEmpty()) return@forEach
+                        val tint = if (kind == Kind.STRANDED) Amber else Jade
+                        item { SectionLabel("$title (${list.size})", sub, tint) }
+                        items(list) { r ->
+                            FileRow(r, r.uri in selected, tint) {
                                 if (r.uri in selected) selected.remove(r.uri)
                                 else selected.add(r.uri)
                             }
                         }
+                        item { Spacer(Modifier.height(10.dp)) }
                     }
-                    if (stranded.isNotEmpty()) {
-                        item {
-                            Spacer(Modifier.height(10.dp))
-                            SectionLabel("STRANDED", "on disk, hidden from gallery", Amber)
-                        }
-                        items(stranded) { FileRow(it, false, Amber, null) }
-                    }
-                    if (scanned && trashed.isEmpty() && stranded.isEmpty()) {
+                    if (scanned && found.isEmpty()) {
                         item {
                             Text(
-                                "\nNOTHING FOUND — no trashed or stranded media on this device.",
+                                "\nNOTHING FOUND — no trashed, stranded, or folder files here.",
                                 color = Dim, fontFamily = Mono, fontSize = 11.sp
                             )
                         }
@@ -244,11 +408,12 @@ class MainActivity : ComponentActivity() {
                     item {
                         Spacer(Modifier.height(24.dp))
                         Text(
-                            "Recovers media Android still holds: trashed items (30–60 day " +
-                                "window) and stranded files hidden from your gallery. Files " +
-                                "erased from encrypted internal storage are gone at the " +
-                                "hardware level — no app recovers those. Fully offline, no " +
-                                "network permission.",
+                            "Scans this phone for trashed and stranded media, and any folder, " +
+                                "SD card or USB stick for every file type. Export writes to a " +
+                                "different volume on purpose — writing back to the source can " +
+                                "overwrite what is still recoverable. Files erased from " +
+                                "encrypted internal storage are gone at the hardware level; no " +
+                                "app recovers those. Fully offline, no network permission.",
                             color = Dim.copy(alpha = 0.55f), fontFamily = Mono,
                             fontSize = 9.sp, lineHeight = 14.sp
                         )
@@ -270,7 +435,7 @@ class MainActivity : ComponentActivity() {
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(if (filled) 48.dp else 60.dp)
+                .height(if (filled) 48.dp else 56.dp)
                 .border(1.dp, Jade.copy(alpha = alpha), RoundedCornerShape(4.dp))
                 .background(
                     if (filled) Jade else Jade.copy(alpha = 0.06f),
@@ -283,9 +448,9 @@ class MainActivity : ComponentActivity() {
                 label,
                 color = if (filled) Ink else Jade,
                 fontFamily = Mono,
-                fontSize = if (filled) 13.sp else 15.sp,
+                fontSize = if (filled) 13.sp else 14.sp,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = if (filled) 2.sp else 3.sp,
+                letterSpacing = 2.sp,
                 modifier = Modifier.alpha(alpha)
             )
         }
@@ -303,20 +468,18 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun FileRow(r: Recoverable, sel: Boolean, tint: Color, onClick: (() -> Unit)?) {
+    private fun FileRow(r: Recoverable, sel: Boolean, tint: Color, onClick: () -> Unit) {
         Row(
             Modifier
                 .fillMaxWidth()
                 .background(if (sel) tint.copy(alpha = 0.12f) else Panel, RoundedCornerShape(3.dp))
                 .border(1.dp, if (sel) tint else Line, RoundedCornerShape(3.dp))
-                .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+                .clickable(onClick = onClick)
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (onClick != null) {
-                Text(if (sel) "◉" else "○", color = tint, fontFamily = Mono, fontSize = 14.sp)
-                Spacer(Modifier.width(12.dp))
-            }
+            Text(if (sel) "◉" else "○", color = tint, fontFamily = Mono, fontSize = 14.sp)
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     r.name, color = Color(0xFFD6E4EF), fontFamily = Mono, fontSize = 12.sp,
