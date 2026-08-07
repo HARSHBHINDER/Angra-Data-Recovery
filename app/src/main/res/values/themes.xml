@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.Angra" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#07090C</item>
+        <item name="android:statusBarColor">#07090C</item>
+        <item name="android:navigationBarColor">#07090C</item>
+    </style>
+</resources>
