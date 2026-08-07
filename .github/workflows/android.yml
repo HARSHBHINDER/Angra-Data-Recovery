@@ -20,7 +20,11 @@ jobs:
           java-version: "17"
 
       # No wrapper jar is committed, so Gradle comes from the action instead.
+      # Pinned: Gradle 9.6.0 removed an internal API that AGP 8.x still relies on,
+      # so an unpinned "latest" breaks the build. Bump only alongside AGP.
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
 
       - name: Build APK
         run: gradle assembleRelease --no-daemon
