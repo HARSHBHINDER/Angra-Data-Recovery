@@ -257,6 +257,9 @@ class MainActivity : ComponentActivity() {
 
     private var usbDevice: UsbBlockDevice? = null
 
+    /** Raw byte source backing the current deep scan — a USB device or a root partition. */
+    private var rawRead: ((Long, ByteArray) -> Int)? = null
+
     /** Materialized carved ranges, keyed by sector offset, so each is extracted at most once. */
     private val materialized = mutableMapOf<Long, Uri>()
 
@@ -267,12 +270,10 @@ class MainActivity : ComponentActivity() {
      * because FAT32/exFAT leave the data intact on delete and cards are not TRIMmed.
      */
     private suspend fun deepScan(
-        dev: UsbBlockDevice,
+        read: (Long, ByteArray) -> Int,
+        total: Long,
         onProgress: (String) -> Unit
     ): List<Recoverable> = withContext(Dispatchers.IO) {
-        val read: (Long, ByteArray) -> Int = { off, dest -> dev.readAt(off, dest) }
-        val total = dev.blockCount * dev.blockSize
-
         // Directory entries first: they carry real names and exact sizes.
         val named = fatDeletedEntries(read) { n -> onProgress("$n deleted entries") }
 
@@ -307,7 +308,7 @@ class MainActivity : ComponentActivity() {
     private suspend fun uriFor(r: Recoverable): Uri? {
         val c = r.carved ?: return r.uri.takeIf { it != Uri.EMPTY }
         materialized[c.offset]?.let { return it }
-        val dev = usbDevice ?: return null
+        val src = rawRead ?: return null
 
         return withContext(Dispatchers.IO) {
             runCatching {
@@ -319,7 +320,7 @@ class MainActivity : ComponentActivity() {
                         while (written < c.length) {
                             val want = minOf(buf.size.toLong(), c.length - written).toInt()
                             val slice = if (want == buf.size) buf else ByteArray(want)
-                            val got = dev.readAt(c.offset + written, slice)
+                            val got = src(c.offset + written, slice)
                             if (got <= 0) break
                             out.write(slice, 0, got)
                             written += got
@@ -593,50 +594,83 @@ class MainActivity : ComponentActivity() {
         onBusy: (Boolean) -> Unit,
         onDone: (List<Recoverable>) -> Unit
     ) {
-        val usb = getSystemService(Context.USB_SERVICE) as UsbManager
-        val device = UsbBlockDevice.candidates(usb).firstOrNull()
-        if (device == null) {
-            onStatus("no USB storage found — connect a drive or card reader via OTG")
-            return
-        }
-
-        fun scan() {
-            val dev = UsbBlockDevice.open(usb, device)
-            if (dev == null) {
-                onStatus("could not open device for raw reading")
-                onBusy(false)
-                return
-            }
-            usbDevice?.close()
-            usbDevice = dev
+        fun run(read: (Long, ByteArray) -> Int, total: Long, label: String) {
+            rawRead = read
             materialized.clear()
             onBusy(true)
             lifecycleScope.launch {
-                val hits = deepScan(dev) { onStatus(it) }
+                onStatus("scanning $label…")
+                val hits = deepScan(read, total) { onStatus(it) }
                 onBusy(false)
                 onDone(hits)
-                onStatus("${hits.size} permanently deleted files recovered")
+                onStatus(
+                    if (hits.isEmpty())
+                        "nothing recoverable in $label — blocks are encrypted or already erased"
+                    else "${hits.size} permanently deleted files found in $label"
+                )
             }
         }
 
-        if (usb.hasPermission(device)) {
-            scan()
-            return
-        }
+        // Internal storage first — that is where downloads and camera files lived. Needs root;
+        // Android exposes no unrooted path to raw blocks, only to files with directory entries.
+        lifecycleScope.launch {
+            val rooted = withContext(Dispatchers.IO) { RootBlockDevice.rootAvailable() }
+            val part = if (rooted) withContext(Dispatchers.IO) {
+                RootBlockDevice.candidates().firstOrNull()
+            } else null
 
-        onStatus("waiting for USB permission…")
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context?, i: android.content.Intent?) {
-                runCatching { unregisterReceiver(this) }
-                if (usb.hasPermission(device)) scan()
-                else onStatus("USB permission denied")
+            if (part != null) {
+                run({ off, dest -> part.readAt(off, dest) }, part.sizeBytes, part.path)
+                return@launch
             }
+
+            val usb = getSystemService(Context.USB_SERVICE) as UsbManager
+            val device = UsbBlockDevice.candidates(usb).firstOrNull()
+            if (device == null) {
+                onStatus(
+                    if (rooted) "root works but no readable partition found"
+                    else "internal storage needs root. Otherwise connect a USB drive or SD " +
+                        "card reader via OTG to deep scan that instead."
+                )
+                return@launch
+            }
+
+            fun openUsb() {
+                val dev = UsbBlockDevice.open(usb, device)
+                if (dev == null) {
+                    onStatus("could not open USB device for raw reading")
+                    onBusy(false)
+                    return
+                }
+                usbDevice?.close()
+                usbDevice = dev
+                run(
+                    { off, dest -> dev.readAt(off, dest) },
+                    dev.blockCount * dev.blockSize,
+                    "USB storage"
+                )
+            }
+
+            if (usb.hasPermission(device)) {
+                openUsb()
+                return@launch
+            }
+
+            onStatus("waiting for USB permission…")
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(c: Context?, i: android.content.Intent?) {
+                    runCatching { unregisterReceiver(this) }
+                    if (usb.hasPermission(device)) openUsb()
+                    else onStatus("USB permission denied")
+                }
+            }
+            ContextCompat.registerReceiver(
+                this@MainActivity, receiver,
+                IntentFilter(UsbBlockDevice.ACTION_PERMISSION),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            UsbBlockDevice.requestPermission(this@MainActivity, usb, device)
         }
-        ContextCompat.registerReceiver(
-            this, receiver, IntentFilter(UsbBlockDevice.ACTION_PERMISSION),
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
-        UsbBlockDevice.requestPermission(this, usb, device)
     }
 
     override fun onDestroy() {
