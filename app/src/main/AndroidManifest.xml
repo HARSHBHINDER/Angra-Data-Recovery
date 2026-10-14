@@ -8,21 +8,38 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
     <application
         android:label="Angra Data Recovery"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.Angra"
-        android:allowBackup="false">
+        android:allowBackup="false"
+        android:hasFragileUserData="false">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="Angra Data Recovery">
+            android:label="Angra Data Recovery"
+            android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Recovered bytes reach the previewer as content:// URIs with a scoped, revocable
+             grant. A raw file:// URI would leak an app-private path and trips StrictMode's
+             FileUriExposure policy. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

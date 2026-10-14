@@ -117,4 +117,17 @@ class CarverTest {
         val junk = ByteArray(1 shl 16) { (it * 31).toByte() }
         assertTrue(fatDeletedEntries(reader(junk)) { }.isEmpty())
     }
+
+    /**
+     * Carved names come from raw disk bytes and then become real filenames, so path traversal
+     * and control characters must not survive. The name is attacker-controlled if the card is.
+     */
+    @Test
+    fun `sanitizes filenames taken from disk bytes`() {
+        assertEquals(".._.._etc_passwd", safeName("../../etc/passwd"))
+        assertEquals("evil_.sh", safeName("  evil|.sh  "))
+        assertEquals("recovered", safeName(""))
+        assertEquals("recovered", safeName("..."))
+        assertTrue(safeName("x".repeat(400)).length <= 120)
+    }
 }

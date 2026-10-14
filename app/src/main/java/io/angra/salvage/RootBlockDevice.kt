@@ -22,6 +22,9 @@ class RootBlockDevice private constructor(
 ) {
 
     companion object {
+        /** Block-device paths only: no spaces, quotes, semicolons, or substitution characters. */
+        private val SAFE_PATH = Regex("^/dev/block/[A-Za-z0-9/_-]+$")
+
         /** True when a root shell answers. Triggers the usual su prompt on first call. */
         fun rootAvailable(): Boolean = runCatching {
             val p = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
@@ -70,6 +73,11 @@ class RootBlockDevice private constructor(
         val skew = (offset % sector).toInt()
         val wanted = minOf(dest.size.toLong(), sizeBytes - offset).toInt()
         val count = (skew + wanted + sector - 1) / sector
+
+        // The path is interpolated into a string executed as root, so it is validated against
+        // the exact shape the enumerator produces rather than trusted. Anything with a shell
+        // metacharacter never reaches the shell.
+        if (!SAFE_PATH.matches(path)) return -1
 
         return runCatching {
             val cmd = "dd if=$path bs=$sector skip=$skip count=$count 2>/dev/null"
